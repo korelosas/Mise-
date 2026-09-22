@@ -4,13 +4,14 @@ export const config = {
   maxDuration: 60
 };
 
-const MODEL = "gemini-3.5-flash-lite";
+const MODEL = "gemini-3.1-flash-lite";
 const ENDPOINT =
   `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent`;
 
 const MAX_BODY_BYTES = 2_800_000;
 const MAX_IMAGE_LENGTH = 650_000;
 const TIMEOUT_MS = 45_000;
+const MAX_IMAGES = 4;
 
 const buckets = new Map();
 let geminiRetryUntil = 0;
@@ -210,86 +211,162 @@ function validateOutput(value) {
   };
 }
 
-export default async function handler(req, res) {
-  const send = (status, body) => {
-    res.statusCode = status;
-    res.setHeader(
-      "Content-Type",
-      "application/json; charset=utf-8"
-    );
-    return res.end(JSON.stringify(body));
-  };
-
-  res.setHeader("Cache-Control", "no-store");
-  res.setHeader(
-    "X-Content-Type-Options",
-    "nosniff"
-  );
-  res.setHeader("Vary", "Origin");
-
-  const allowed = (
+function getAllowedOrigins() {
+  return (
     process.env.ALLOWED_ORIGINS || ""
   )
     .split(",")
     .map((value) => value.trim())
     .filter(Boolean);
+}
 
-  if (!allowed.length) {
-    return send(503, {
-      error: "Serverkonfiguration fehlt",
-      code: "SERVER_NOT_CONFIGURED"
-    });
-  }
-
-  const origin = req.headers.origin;
-
-  if (
-    typeof origin !== "string" ||
-    !allowed.includes(origin)
-  ) {
-    return send(403, {
-      error: "Origin not allowed"
-    });
-  }
+function applyCors(
+  req,
+  res,
+  allowedOrigins
+) {
+  const origin =
+    req.headers.origin;
 
   res.setHeader(
-    "Access-Control-Allow-Origin",
-    origin
+    "Vary",
+    "Origin"
   );
+
   res.setHeader(
     "Access-Control-Allow-Methods",
     "POST, OPTIONS"
   );
+
   res.setHeader(
     "Access-Control-Allow-Headers",
-    "Content-Type, Authorization"
+    "Authorization, Content-Type"
   );
+
+  res.setHeader(
+    "Access-Control-Max-Age",
+    "86400"
+  );
+
   res.setHeader(
     "Access-Control-Expose-Headers",
     "Retry-After"
   );
 
-  if (req.method === "OPTIONS") {
+  if (
+    typeof origin === "string" &&
+    allowedOrigins.includes(origin)
+  ) {
+    res.setHeader(
+      "Access-Control-Allow-Origin",
+      origin
+    );
+
+    return origin;
+  }
+
+  return null;
+}
+
+export default async function handler(
+  req,
+  res
+) {
+  const send = (
+    status,
+    body
+  ) => {
+    res.statusCode = status;
+
+    res.setHeader(
+      "Content-Type",
+      "application/json; charset=utf-8"
+    );
+
+    return res.end(
+      JSON.stringify(body)
+    );
+  };
+
+  res.setHeader(
+    "Cache-Control",
+    "no-store"
+  );
+
+  res.setHeader(
+    "X-Content-Type-Options",
+    "nosniff"
+  );
+
+  const allowedOrigins =
+    getAllowedOrigins();
+
+  if (
+    !allowedOrigins.length
+  ) {
+    return send(503, {
+      error:
+        "Serverkonfiguration fehlt",
+      code:
+        "SERVER_NOT_CONFIGURED"
+    });
+  }
+
+  const origin =
+    applyCors(
+      req,
+      res,
+      allowedOrigins
+    );
+
+  if (!origin) {
+    return send(403, {
+      error:
+        "Origin not allowed"
+    });
+  }
+
+  if (
+    req.method === "OPTIONS"
+  ) {
     res.statusCode = 204;
     return res.end();
   }
 
-  if (req.method !== "POST") {
+  if (
+    req.method !== "POST"
+  ) {
     res.setHeader(
       "Allow",
       "POST, OPTIONS"
     );
 
     return send(405, {
-      error: "Method not allowed"
+      error:
+        "Method not allowed"
     });
   }
 
+  console.log(
+    "Mise analyze POST received",
+    {
+      origin,
+      contentType:
+        req.headers[
+          "content-type"
+        ] || ""
+    }
+  );
+
   const apiKey =
-    process.env.GEMINI_API_KEY?.trim();
+    process.env
+      .GEMINI_API_KEY
+      ?.trim();
 
   const accessToken =
-    process.env.MISE_ACCESS_TOKEN;
+    process.env
+      .MISE_ACCESS_TOKEN
+      ?.trim();
 
   if (
     !apiKey ||
@@ -297,8 +374,10 @@ export default async function handler(req, res) {
     accessToken.length < 32
   ) {
     return send(503, {
-      error: "KI-Erkennung noch nicht verbunden",
-      code: "SERVER_NOT_CONFIGURED"
+      error:
+        "KI-Erkennung noch nicht verbunden",
+      code:
+        "SERVER_NOT_CONFIGURED"
     });
   }
 
@@ -306,7 +385,8 @@ export default async function handler(req, res) {
     req.headers.authorization;
 
   const bearer =
-    typeof authorization === "string"
+    typeof authorization ===
+    "string"
       ? /^Bearer ([^\s]+)$/i.exec(
           authorization
         )
@@ -320,26 +400,35 @@ export default async function handler(req, res) {
     )
   ) {
     return send(401, {
-      error: "Unauthorized"
+      error:
+        "Unauthorized"
     });
   }
 
   if (
     !/^application\/json(?:\s*;|\s*$)/i.test(
-      req.headers["content-type"] || ""
+      req.headers[
+        "content-type"
+      ] || ""
     )
   ) {
     return send(400, {
-      error: "JSON payload required"
+      error:
+        "JSON payload required"
     });
   }
 
   let parts;
 
   try {
-    const raw = Buffer.isBuffer(req.body)
-      ? req.body.toString("utf8")
-      : req.body;
+    const raw =
+      Buffer.isBuffer(
+        req.body
+      )
+        ? req.body.toString(
+            "utf8"
+          )
+        : req.body;
 
     const serialized =
       typeof raw === "string"
@@ -347,11 +436,13 @@ export default async function handler(req, res) {
         : JSON.stringify(raw);
 
     if (
-      typeof serialized !== "string" ||
-      Buffer.byteLength(serialized) >
-        MAX_BODY_BYTES
+      typeof serialized !==
+        "string" ||
+      Buffer.byteLength(
+        serialized
+      ) > MAX_BODY_BYTES
     ) {
-      return send(400, {
+      return send(413, {
         error:
           "Invalid or oversized payload"
       });
@@ -364,17 +455,25 @@ export default async function handler(req, res) {
 
     if (
       !body ||
-      typeof body !== "object" ||
+      typeof body !==
+        "object" ||
       Array.isArray(body) ||
-      !Array.isArray(body.images) ||
+      !Array.isArray(
+        body.images
+      ) ||
       body.images.length < 1 ||
-      body.images.length > 4
+      body.images.length >
+        MAX_IMAGES
     ) {
-      throw new Error("Invalid images");
+      throw new Error(
+        "Invalid images"
+      );
     }
 
     parts = [
-      ...new Set(body.images)
+      ...new Set(
+        body.images
+      )
     ].map(imagePart);
   } catch {
     return send(400, {
@@ -383,38 +482,55 @@ export default async function handler(req, res) {
     });
   }
 
-  const now = Date.now();
+  const now =
+    Date.now();
 
-  const quotaResponse = () => {
-    const retryAfter = Math.max(
-      1,
-      Math.ceil(
-        (geminiRetryUntil -
-          Date.now()) /
-          1000
-      )
-    );
+  const quotaResponse =
+    () => {
+      const retryAfter =
+        Math.max(
+          1,
+          Math.ceil(
+            (
+              geminiRetryUntil -
+              Date.now()
+            ) /
+              1000
+          )
+        );
 
-    res.setHeader(
-      "Retry-After",
-      String(retryAfter)
-    );
+      res.setHeader(
+        "Retry-After",
+        String(retryAfter)
+      );
 
-    return send(429, {
-      error:
-        "Gemini-KI-Limit erreicht. Bitte später erneut versuchen.",
-      code: "GEMINI_QUOTA_EXCEEDED",
-      source: "gemini",
-      retryAfter
-    });
-  };
+      return send(429, {
+        error:
+          "Gemini-KI-Limit erreicht. Bitte später erneut versuchen.",
+        code:
+          "GEMINI_QUOTA_EXCEEDED",
+        source:
+          "gemini",
+        retryAfter
+      });
+    };
 
-  if (geminiRetryUntil > now) {
+  if (
+    geminiRetryUntil >
+    now
+  ) {
     return quotaResponse();
   }
 
-  for (const [key, value] of buckets) {
-    if (value.reset <= now) {
+  for (
+    const [
+      key,
+      value
+    ] of buckets
+  ) {
+    if (
+      value.reset <= now
+    ) {
       buckets.delete(key);
     }
   }
@@ -425,7 +541,8 @@ export default async function handler(req, res) {
   if (!bucket) {
     bucket = {
       count: 0,
-      reset: now + 60000
+      reset:
+        now + 60_000
     };
 
     buckets.set(
@@ -434,14 +551,20 @@ export default async function handler(req, res) {
     );
   }
 
-  if (bucket.count >= 12) {
-    const retryAfter = Math.max(
-      1,
-      Math.ceil(
-        (bucket.reset - now) /
-          1000
-      )
-    );
+  if (
+    bucket.count >= 12
+  ) {
+    const retryAfter =
+      Math.max(
+        1,
+        Math.ceil(
+          (
+            bucket.reset -
+            now
+          ) /
+            1000
+        )
+      );
 
     res.setHeader(
       "Retry-After",
@@ -451,8 +574,10 @@ export default async function handler(req, res) {
     return send(429, {
       error:
         "Zu viele Analyse-Anfragen an dieses Backend.",
-      code: "LOCAL_RATE_LIMIT",
-      source: "backend",
+      code:
+        "LOCAL_RATE_LIMIT",
+      source:
+        "backend",
       retryAfter
     });
   }
@@ -464,7 +589,8 @@ export default async function handler(req, res) {
 
   const timer =
     setTimeout(
-      () => controller.abort(),
+      () =>
+        controller.abort(),
       TIMEOUT_MS
     );
 
@@ -486,21 +612,24 @@ export default async function handler(req, res) {
           signal:
             controller.signal,
 
-          redirect: "error",
+          redirect:
+            "error",
 
           body:
             JSON.stringify({
               systemInstruction: {
                 parts: [
                   {
-                    text: PROMPT
+                    text:
+                      PROMPT
                   }
                 ]
               },
 
               contents: [
                 {
-                  role: "user",
+                  role:
+                    "user",
 
                   parts: [
                     {
@@ -514,10 +643,15 @@ export default async function handler(req, res) {
               ],
 
               generationConfig: {
-                candidateCount: 1,
-                maxOutputTokens: 8192,
+                candidateCount:
+                  1,
+
+                maxOutputTokens:
+                  4096,
+
                 responseMimeType:
                   "application/json",
+
                 responseJsonSchema:
                   schema
               }
@@ -525,7 +659,10 @@ export default async function handler(req, res) {
         }
       );
 
-    if (upstream.status === 429) {
+    if (
+      upstream.status ===
+      429
+    ) {
       bucket.count =
         Math.max(
           0,
@@ -541,7 +678,9 @@ export default async function handler(req, res) {
 
       if (
         header &&
-        /^\d+$/.test(header)
+        /^\d+$/.test(
+          header
+        )
       ) {
         seconds =
           Number(header);
@@ -554,7 +693,9 @@ export default async function handler(req, res) {
         seconds =
           Math.ceil(
             (
-              Date.parse(header) -
+              Date.parse(
+                header
+              ) -
               Date.now()
             ) /
               1000
@@ -576,31 +717,41 @@ export default async function handler(req, res) {
     }
 
     if (
-      upstream.status === 408 ||
-      upstream.status === 504
+      upstream.status ===
+        408 ||
+      upstream.status ===
+        504
     ) {
       return send(504, {
         error:
           "Die KI-Analyse hat zu lange gedauert.",
-        code: "GEMINI_TIMEOUT"
+        code:
+          "GEMINI_TIMEOUT"
       });
     }
 
-    if (!upstream.ok) {
+    if (
+      !upstream.ok
+    ) {
       const errorText =
         await upstream.text();
 
       console.error(
         "Gemini request failed:",
         upstream.status,
-        errorText.slice(0, 1000)
+        errorText.slice(
+          0,
+          1500
+        )
       );
 
       return send(502, {
         error:
           "Gemini-Anfrage fehlgeschlagen.",
         code:
-          "GEMINI_REQUEST_FAILED"
+          "GEMINI_REQUEST_FAILED",
+        upstreamStatus:
+          upstream.status
       });
     }
 
@@ -611,13 +762,14 @@ export default async function handler(req, res) {
       result?.candidates?.[0];
 
     if (
-      result?.promptFeedback
+      result
+        ?.promptFeedback
         ?.blockReason ||
       !candidate ||
-      candidate.finishReason !==
-        "STOP" ||
       !Array.isArray(
-        candidate.content?.parts
+        candidate
+          .content
+          ?.parts
       )
     ) {
       return send(502, {
@@ -629,24 +781,30 @@ export default async function handler(req, res) {
     }
 
     const output =
-      candidate.content.parts
+      candidate
+        .content
+        .parts
         .filter(
           (part) =>
             part &&
-            part.thought !== true &&
+            part.thought !==
+              true &&
             typeof part.text ===
               "string"
         )
         .map(
-          (part) => part.text
+          (part) =>
+            part.text
         )
         .join("")
         .trim();
 
     if (
       !output ||
-      Buffer.byteLength(output) >
-        100000
+      Buffer.byteLength(
+        output
+      ) >
+        100_000
     ) {
       throw new Error(
         "Invalid output"
@@ -661,7 +819,9 @@ export default async function handler(req, res) {
     );
   } catch (error) {
     if (
-      controller.signal.aborted
+      controller
+        .signal
+        .aborted
     ) {
       return send(504, {
         error:
@@ -673,7 +833,8 @@ export default async function handler(req, res) {
 
     console.error(
       "Gemini analysis failed:",
-      error?.message || error
+      error?.message ||
+        error
     );
 
     return send(502, {
